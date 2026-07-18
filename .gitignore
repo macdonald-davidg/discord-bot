@@ -20,3 +20,6 @@ pids
 
 # Docker specific
 .dockerignore 
+
+# Ignore config directory
+config/
