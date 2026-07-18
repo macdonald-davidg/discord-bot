@@ -182,7 +182,10 @@ async function getModels() {
     };
     
     // Use the documented endpoint
-    const response = await axios.get(`${process.env.OPEN_WEBUI_URL}/api/models`, { headers });
+    const response = await axios.get(`${process.env.OPEN_WEBUI_URL}/api/models`, {
+      headers,
+      timeout: 10000 // 10 second timeout
+    });
     
     console.log(`Models request successful: Status ${response.status}`);
     

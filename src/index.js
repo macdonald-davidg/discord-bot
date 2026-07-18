@@ -84,20 +84,15 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy', uptime: process.uptime() });
 });
 
-// Start server with error handling for port in use
-const server = app.listen(PORT, () => {
+// If the port can't be bound, exit rather than falling back to a random
+// port: the Docker healthcheck probes $PORT specifically, so a fallback
+// port would leave the container permanently "unhealthy" anyway. Crashing
+// lets `restart: unless-stopped` retry cleanly instead.
+app.listen(PORT, () => {
   console.log(`Health check server running on port ${PORT}`);
 }).on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.log(`Port ${PORT} is already in use. Trying alternative port...`);
-    // Try to use a different port
-    server.close();
-    const newServer = app.listen(0, () => { // Port 0 means the OS will assign an available port
-      console.log(`Health check server running on port ${newServer.address().port}`);
-    });
-  } else {
-    console.error('Server error:', err);
-  }
+  console.error(`Health check server failed to start on port ${PORT}:`, err);
+  process.exit(1);
 });
 
 // Register basic ready event if no event files

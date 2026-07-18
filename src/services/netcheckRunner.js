@@ -4,7 +4,23 @@ const fs = require('fs');
 const path = require('path');
 
 const allowlistPath = path.join(__dirname, '..', '..', 'config', 'allowlist.json');
-const allowlist = JSON.parse(fs.readFileSync(allowlistPath, 'utf8'));
+
+// The allowlist is required for every netcheck command to even be defined,
+// so a missing/broken file is fatal — but fail with an error that says
+// exactly what's wrong and how to fix it, instead of a bare ENOENT stack
+// trace from deep inside a require() chain.
+let allowlist;
+try {
+  allowlist = JSON.parse(fs.readFileSync(allowlistPath, 'utf8'));
+} catch (err) {
+  if (err.code === 'ENOENT') {
+    throw new Error(
+      `Missing allowlist config: ${allowlistPath}\n` +
+      'Copy config/allowlist.example.json to config/allowlist.json and edit it for your hosts and checks.'
+    );
+  }
+  throw new Error(`Failed to parse ${allowlistPath}: ${err.message}`);
+}
 
 const OPEN_TERMINAL_URL = process.env.OPEN_TERMINAL_URL;
 const OPEN_TERMINAL_API_KEY = process.env.OPEN_TERMINAL_API_KEY;

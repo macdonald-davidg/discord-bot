@@ -1,0 +1,15 @@
+# Never bake secrets or local state into the image
+.env
+node_modules
+logs
+*.log
+npm-debug.log*
+
+# Repo/dev files the runtime doesn't need
+.git
+.gitignore
+README.md
+test-chat-api.js
+
+# The real allowlist is bind-mounted at runtime; only the example ships
+config/allowlist.json

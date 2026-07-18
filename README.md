@@ -8,6 +8,7 @@ A Discord bot that interacts with a self-hosted Open WebUI instance, allowing yo
 - `/status` - Get the status of your Open WebUI instance
 - `/models` - List all available models in your Open WebUI instance
 - `/ask` - Ask a question to your AI models through Open WebUI
+- `/linux`, `/docker`, `/pihole`, `/proxmox`, `/windows`, `/fileserver` - Run allowlisted diagnostic checks on your hosts via open-terminal (configured in `config/allowlist.json`; mutating checks require an in-Discord confirmation)
 
 ## Prerequisites
 
@@ -43,6 +44,10 @@ OPEN_WEBUI_URL=https://your-openwebui-domain.com
 # Get your API key from Settings > Account in Open WebUI
 OPEN_WEBUI_API_KEY=your_open_webui_api_key
 
+# open-terminal (required by the netcheck commands)
+OPEN_TERMINAL_URL=http://your-open-terminal-host:8100
+OPEN_TERMINAL_API_KEY=your_open_terminal_api_key
+
 # Rate Limiting (requests per minute)
 RATE_LIMIT=10
 
@@ -50,13 +55,24 @@ RATE_LIMIT=10
 PORT=3001
 ```
 
-### 3. Install dependencies (if not using Docker)
+### 3. Configure the command allowlist
+
+The netcheck commands (`/linux`, `/docker`, etc.) refuse to start without an
+allowlist describing which hosts can be reached and which checks may run on
+them:
+
+```bash
+cp config/allowlist.example.json config/allowlist.json
+# then edit config/allowlist.json for your hosts and checks
+```
+
+### 4. Install dependencies (if not using Docker)
 
 ```bash
 npm install
 ```
 
-### 4. Run the bot
+### 5. Run the bot
 
 #### Using Node.js directly
 
@@ -66,8 +82,14 @@ npm start
 
 #### Using Docker Compose
 
+This repo intentionally has no compose file of its own. The bot is deployed
+as the `discord-bot` service in the **llm-stack** repo's
+`docker-compose.yml`, which builds this repo's Dockerfile from a clone at
+`llm-stack/discord-bot/`:
+
 ```bash
-docker-compose up -d
+cd ../llm-stack
+docker compose up -d --build discord-bot
 ```
 
 ## Discord Bot Setup

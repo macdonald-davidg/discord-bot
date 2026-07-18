@@ -18,8 +18,6 @@ pids
 # Optional npm cache directory
 .npm
 
-# Docker specific
-.dockerignore 
-
-# Ignore config directory
-config/
+# Ignore the real allowlist (environment-specific); the committed
+# allowlist.example.json documents the expected schema.
+config/allowlist.json
