@@ -128,27 +128,31 @@ shared/fleet-wide key in `open-terminal` at all (there was, historically; see
 "History" below). A leak of any one key exposes exactly one host, not the
 rest of the fleet.
 
-| Host key | Hostname | Key file (container path) |
+| Host key (example) | Example hostname | Key file (container path) |
 |---|---|---|
-| `dmz.dns1` | dns1.mrenet.dmz | `/home/user/.ssh/bot_dmzdns1_ed25519` |
-| `dmz.dns2` | dns2.mrenet.dmz | `/home/user/.ssh/bot_dmzdns2_ed25519` |
-| `lan.dns1` | redacted-dns1.example.internal | `/home/user/.ssh/bot_landns1_ed25519` |
-| `lan.dns2` | redacted-dns2.example.internal | `/home/user/.ssh/bot_landns2_ed25519` |
-| `lan.server` | redacted-hypervisor.example.internal | `/home/user/.ssh/bot_server_ed25519` |
-| `lan.jarvis` | redacted-dockerhost.example.internal (this host) | `/home/user/.ssh/bot_llmgpu_ed25519` |
-| `dmz.docker` | docker-vm.mrenet.dmz | `/home/user/.ssh/bot_dmzdocker_ed25519` |
-| `lan.cifs` | redacted-fileserver.example.internal | `/home/user/.ssh/bot_cifs_ed25519` |
-| `lan.itunes` | redacted-media.example.internal (Windows) | `/home/user/.ssh/bot_itunes_ed25519` |
-| `lan.router` | redacted-router.example.internal | `/home/user/.ssh/bot_router_ed25519` |
+| `dmz.dns1` | dns1.example.dmz | `/home/user/.ssh/bot_dmzdns1_ed25519` |
+| `dmz.dns2` | dns2.example.dmz | `/home/user/.ssh/bot_dmzdns2_ed25519` |
+| `lan.dns1` | dns1.example.local | `/home/user/.ssh/bot_landns1_ed25519` |
+| `lan.dns2` | dns2.example.local | `/home/user/.ssh/bot_landns2_ed25519` |
+| `lan.server` | hypervisor.example.local | `/home/user/.ssh/bot_server_ed25519` |
+| `lan.jarvis` | (the host this bot runs on) | `/home/user/.ssh/bot_llmgpu_ed25519` |
+| `dmz.docker` | docker.example.dmz | `/home/user/.ssh/bot_dmzdocker_ed25519` |
+| `lan.cifs` | fileserver.example.local | `/home/user/.ssh/bot_cifs_ed25519` |
+| `lan.itunes` | media-vm.example.local (Windows) | `/home/user/.ssh/bot_itunes_ed25519` |
+| `lan.router` | router.example.local | `/home/user/.ssh/bot_router_ed25519` |
+
+(Host keys and file-naming pattern shown above match this deployment's real
+`config/allowlist.json`, which is gitignored and never leaves this machine —
+the example hostnames in the table are placeholders, not this network's
+actual DNS names.)
 
 **This is a separate credential tier from the interactive `jarvis` identity.**
-`jarvis_fleet_ed25519` (`/home/jarvis/.ssh/id_ed25519` on the host and on
-starkindustries — see `~/documents/passwordless-ssh-sudo-network-guide.md`)
-is what's used for direct/scripted admin sessions (e.g. by a human or Claude
-Code running commands against the fleet), stays intentionally broad, and is
-**still present** in every host's `authorized_keys` alongside its dedicated
-`bot_*` key — splitting the interactive identity per-host was explicitly out
-of scope for this migration, since it would mean juggling multiple keys for
+A single passwordless-sudo automation account (deployed the same way across
+every fleet host — its own key, `NOPASSWD: ALL` sudo) is what's used for
+direct/scripted admin sessions, stays intentionally broad, and is **still
+present** in every host's `authorized_keys` alongside its dedicated `bot_*`
+key — splitting the interactive identity per-host was explicitly out of
+scope for this migration, since it would mean juggling multiple keys for
 ordinary ad hoc admin work. `open-terminal` never holds a copy of the
 interactive key, only its own per-host `bot_*` keys.
 
@@ -175,7 +179,8 @@ end in a newline, `Add-Content`/`>>` appends the new key onto the *same line*
 as the last one instead of starting a new line — the file looks fine at a
 glance but the appended key silently doesn't parse (sshd reads the first
 key's type+blob as valid, swallows everything after into the trailing
-comment field). Hit this live on `itunes-vm` 2026-07-20. Use `Set-Content`
+comment field). Hit this live on the `lan.itunes` host in this deployment.
+Use `Set-Content`
 with an explicit array of lines (or verify with `Get-Content $file |
 ForEach-Object { ... }` line-by-line) instead of trusting a raw `Get-Content
 -Raw` dump not to hide a missing line break. Also re-assert ACLs after any
@@ -194,25 +199,28 @@ key file was deleted from `open-terminal`'s volume and its
 key itself was **not** revoked from any fleet host's `authorized_keys` — it's
 still what the interactive `jarvis` identity uses.
 
-**Why `/router` is read-only:** the UDM SE has no non-root SSH account, so
-`lan.router` necessarily authenticates as `root` — there's no unprivileged
-account to fall back to the way `jarvis` is unprivileged-until-`sudo` on
-every other host. `buildCategoryCommand()` takes a `readOnly: true` option
-(see `src/commands/router.js`) that throws at startup if the category ever
-picks up a `mutating: true` check, so a future allowlist edit can't silently
-turn a read-only category into one that can change state on the household's
-sole gateway/firewall from Discord.
+**Why `/router` is read-only:** many consumer/prosumer router/gateway
+appliances have no non-root SSH account, so `lan.router` necessarily
+authenticates as `root` — there's no unprivileged account to fall back to
+the way `jarvis` is unprivileged-until-`sudo` on every other host.
+`buildCategoryCommand()` takes a `readOnly: true` option (see
+`src/commands/router.js`) that throws at startup if the category ever picks
+up a `mutating: true` check, so a future allowlist edit can't silently turn
+a read-only category into one that can change state on the network's
+gateway/firewall from Discord.
 
-**Persisting a key on the UDM SE across reboots/firmware updates:** this
-device (UniFi OS `uos` 5.1.4-era, no `unifi-os shell`) doesn't use the
-classic `/mnt/data/on_boot.d/` + `udm-boot` mechanism most guides describe —
-that assumes a nested container architecture this firmware doesn't have. Use
+**Persisting a key on a UniFi Dream Machine-family router across reboots and
+firmware updates:** newer UniFi OS builds (`uos` CLI, no `unifi-os shell`
+binary at all) don't use the classic `/mnt/data/on_boot.d/` + `udm-boot`
+mechanism most guides describe — that assumes a nested container
+architecture this firmware generation doesn't have. Use
 [`unifi-on-boot`](https://github.com/unredacted/unifi-on-boot) instead: it
 operates directly on the host filesystem, installs proper systemd units, and
 integrates with the OS's own `ubnt-dpkg-cache` package-persistence mechanism.
-Scripts go in `/data/on_boot.d/` (not `/mnt/data/`). Confirmed working on
-this device 2026-07-20; check `uos --version` on any other UniFi OS console
-before assuming either mechanism applies.
+Scripts go in `/data/on_boot.d/` (not `/mnt/data/`). Confirmed working
+against a `uos 5.1.4` device in this deployment; check `uos --version` (vs.
+whether `unifi-os` exists at all) on any other UniFi OS console before
+assuming either mechanism applies.
 
 ## Discord Bot Setup
 
