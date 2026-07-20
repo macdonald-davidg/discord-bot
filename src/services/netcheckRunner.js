@@ -36,10 +36,25 @@ const hostChoices = Object.entries(allowlist.hosts)
  * All four category commands share this exact execution path — only the
  * category key, command name, and description differ between them.
  */
-function buildCategoryCommand({ categoryKey, commandName, commandDescription }) {
+function buildCategoryCommand({ categoryKey, commandName, commandDescription, readOnly = false }) {
   const checks = allowlist.categories[categoryKey];
   if (!checks) {
     throw new Error(`Unknown allowlist category: ${categoryKey}`);
+  }
+
+  // Safety net for categories deliberately scoped to read-only (currently
+  // just "router" — see config/allowlist.json and src/commands/router.js).
+  // Fails loudly at startup rather than letting a future allowlist edit
+  // silently add a mutating command to a category that was reviewed and
+  // approved specifically because it couldn't change state.
+  if (readOnly) {
+    const mutatingKeys = Object.entries(checks).filter(([, c]) => c.mutating).map(([k]) => k);
+    if (mutatingKeys.length > 0) {
+      throw new Error(
+        `Category "${categoryKey}" is built with readOnly: true but has mutating: true checks: ${mutatingKeys.join(', ')}. ` +
+        'Either remove mutating from those checks or drop readOnly from the command definition.'
+      );
+    }
   }
 
   const checkChoices = Object.entries(checks)
@@ -139,70 +154,106 @@ function buildCategoryCommand({ categoryKey, commandName, commandDescription }) 
   };
 }
 
+/**
+ * Runs a single command on a remote host via open-terminal (SSH under the
+ * hood) and polls until completion or timeout. This is the shared execution
+ * primitive behind both the per-check category commands (buildCategoryCommand
+ * below) and any command that needs to SSH out without the host/check
+ * allowlist dropdown flow, e.g. /jarvis-audit, which sweeps every host with
+ * a fixed command rather than letting the user pick one check.
+ *
+ * Returns { status, exitCode, outputText } rather than touching Discord at
+ * all, so callers control their own embeds/formatting.
+ */
+async function executeRemoteCommand({ sshUser, hostname, remoteCommand, maxWaitMs = 25000, identityFile }) {
+  // Properly escape any single quotes within remoteCommand using the
+  // standard POSIX technique ('->'\'') before wrapping in outer single
+  // quotes. Without this, a literal single quote inside remoteCommand
+  // (extremely common in PowerShell string literals, e.g. 'Running')
+  // would prematurely close our quoting and get silently stripped
+  // rather than erroring loudly — exactly the bug this fixes.
+  const escapedRemoteCommand = remoteCommand.replace(/'/g, `'\\''`);
+  // ConnectTimeout keeps a down/unreachable host from hanging the caller for
+  // the platform's default TCP timeout — matters most for /jarvis-audit,
+  // which sweeps hosts that may not all be up.
+  //
+  // Every host in config/allowlist.json sets identity_file to its own
+  // dedicated, single-host-scoped key (see README.md's "SSH key
+  // architecture") — open-terminal holds no shared/fleet-wide key at all,
+  // so a leak of one host's key doesn't expose any other host.
+  // IdentitiesOnly=yes stops ssh from also trying any other identity it
+  // might otherwise pick up from its own ~/.ssh/config, keeping auth
+  // deterministic. identityFile is technically optional in this function's
+  // signature (falls back to ssh's own default identity resolution when
+  // omitted) in case a host is ever added without one.
+  const identityOpts = identityFile ? `-i ${identityFile} -o IdentitiesOnly=yes ` : '';
+  const sshCommand = `ssh -T -o BatchMode=yes -o ConnectTimeout=8 ${identityOpts}-l ${sshUser} ${hostname} '${escapedRemoteCommand}'`;
+
+  const headers = {
+    Authorization: `Bearer ${OPEN_TERMINAL_API_KEY}`,
+    'Content-Type': 'application/json'
+  };
+
+  const startRes = await axios.post(
+    `${OPEN_TERMINAL_URL}/execute`,
+    { command: sshCommand },
+    { headers, timeout: 10000 }
+  );
+
+  const processId = startRes.data.id;
+  let status = startRes.data.status;
+  let exitCode = startRes.data.exit_code;
+  let output = Array.isArray(startRes.data.output)
+    ? startRes.data.output.map(o => (typeof o === 'string' ? o : o.data ?? JSON.stringify(o)))
+    : [];
+  let offset = startRes.data.next_offset || 0;
+
+  const pollIntervalMs = 1000;
+  const startTime = Date.now();
+
+  while (status === 'running' && Date.now() - startTime < maxWaitMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+
+    const statusRes = await axios.get(
+      `${OPEN_TERMINAL_URL}/execute/${processId}/status`,
+      { headers, params: { offset }, timeout: 10000 }
+    );
+
+    status = statusRes.data.status;
+    exitCode = statusRes.data.exit_code;
+    if (Array.isArray(statusRes.data.output)) {
+      output = output.concat(
+        statusRes.data.output.map(o => (typeof o === 'string' ? o : o.data ?? JSON.stringify(o)))
+      );
+    }
+    offset = statusRes.data.next_offset ?? offset;
+  }
+
+  // If it's still running after our patience window, kill it rather
+  // than leave an orphaned sudo-capable SSH session dangling remotely.
+  if (status === 'running') {
+    try {
+      await axios.delete(`${OPEN_TERMINAL_URL}/execute/${processId}`, { headers, timeout: 5000 });
+    } catch (killErr) {
+      console.error('Failed to clean up timed-out process:', killErr.message);
+    }
+  }
+
+  const outputText = output.join('\n').trim().slice(0, 3800) || '(no output captured)';
+
+  return { status, exitCode, outputText };
+}
+
 async function runCheck({ interaction, commandName, hostKey, checkKey, host, check }) {
       const remoteCommand = check.sudo ? `sudo ${check.command}` : check.command;
-      // Properly escape any single quotes within remoteCommand using the
-      // standard POSIX technique ('->'\'') before wrapping in outer single
-      // quotes. Without this, a literal single quote inside remoteCommand
-      // (extremely common in PowerShell string literals, e.g. 'Running')
-      // would prematurely close our quoting and get silently stripped
-      // rather than erroring loudly — exactly the bug this fixes.
-      const escapedRemoteCommand = remoteCommand.replace(/'/g, `'\\''`);
-      const sshCommand = `ssh -T -o BatchMode=yes -l ${host.ssh_user} ${host.hostname} '${escapedRemoteCommand}'`;
-
-      const headers = {
-        Authorization: `Bearer ${OPEN_TERMINAL_API_KEY}`,
-        'Content-Type': 'application/json'
-      };
 
       try {
-        const startRes = await axios.post(
-          `${OPEN_TERMINAL_URL}/execute`,
-          { command: sshCommand },
-          { headers, timeout: 10000 }
-        );
-
-        const processId = startRes.data.id;
-        let status = startRes.data.status;
-        let exitCode = startRes.data.exit_code;
-        let output = Array.isArray(startRes.data.output)
-          ? startRes.data.output.map(o => (typeof o === 'string' ? o : o.data ?? JSON.stringify(o)))
-          : [];
-        let offset = startRes.data.next_offset || 0;
-
-        const maxWaitMs = 25000; // stay under Discord's interaction edit window
-        const pollIntervalMs = 1000;
-        const startTime = Date.now();
-
-        while (status === 'running' && Date.now() - startTime < maxWaitMs) {
-          await new Promise(r => setTimeout(r, pollIntervalMs));
-
-          const statusRes = await axios.get(
-            `${OPEN_TERMINAL_URL}/execute/${processId}/status`,
-            { headers, params: { offset }, timeout: 10000 }
-          );
-
-          status = statusRes.data.status;
-          exitCode = statusRes.data.exit_code;
-          if (Array.isArray(statusRes.data.output)) {
-            output = output.concat(
-              statusRes.data.output.map(o => (typeof o === 'string' ? o : o.data ?? JSON.stringify(o)))
-            );
-          }
-          offset = statusRes.data.next_offset ?? offset;
-        }
-
-        // If it's still running after our patience window, kill it rather
-        // than leave an orphaned sudo-capable SSH session dangling remotely.
-        if (status === 'running') {
-          try {
-            await axios.delete(`${OPEN_TERMINAL_URL}/execute/${processId}`, { headers, timeout: 5000 });
-          } catch (killErr) {
-            console.error('Failed to clean up timed-out process:', killErr.message);
-          }
-        }
-
-        const outputText = output.join('\n').trim().slice(0, 3800) || '(no output captured)';
+        const { status, exitCode, outputText } = await executeRemoteCommand({
+          sshUser: host.ssh_user,
+          hostname: host.hostname,
+          remoteCommand,
+          identityFile: host.identity_file
+        });
 
         const embed = new EmbedBuilder()
           .setColor(status === 'completed' && exitCode === 0 ? 0x00cc66 : 0xff9900)
@@ -230,4 +281,4 @@ async function runCheck({ interaction, commandName, hostKey, checkKey, host, che
       }
 }
 
-module.exports = { buildCategoryCommand };
+module.exports = { buildCategoryCommand, executeRemoteCommand, allowlist };
