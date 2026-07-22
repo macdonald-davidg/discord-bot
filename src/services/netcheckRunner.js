@@ -73,9 +73,25 @@ function buildCategoryCommand({ categoryKey, commandName, commandDescription, re
     }
   }
 
-  const checkChoices = Object.entries(checks)
-    .slice(0, 25)
-    .map(([key, c]) => ({ name: `${key} — ${c.description}`.slice(0, 100), value: key }));
+  // Discord caps a string option at 25 choices total. Fail loudly at
+  // startup rather than silently slicing off the tail of the check list —
+  // confirmed 2026-07-22 this isn't hypothetical: "proxmox" briefly hit 31
+  // checks while adding on-demand backup support, which would have made
+  // the last 6 checks permanently unreachable via the dropdown with no
+  // error anywhere. Split into "proxmox" + "proxmox-backup" instead; this
+  // guard exists so the next category that grows past 25 breaks the build,
+  // not a Discord dropdown silently missing entries.
+  const checkKeys = Object.keys(checks);
+  if (checkKeys.length > 25) {
+    throw new Error(
+      `Category "${categoryKey}" has ${checkKeys.length} checks, over Discord's 25-choice-per-option limit. ` +
+      'Split it into multiple categories/commands (see proxmox vs proxmox-backup for the pattern) instead of ' +
+      'letting choices silently truncate.'
+    );
+  }
+
+  const checkChoices = checkKeys
+    .map(key => ({ name: `${key} — ${checks[key].description}`.slice(0, 100), value: key }));
 
   return {
     cooldown: 10,

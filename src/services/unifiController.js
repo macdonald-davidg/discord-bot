@@ -64,7 +64,7 @@ async function login() {
  * each field line (trim() strips \r along with other whitespace) so field
  * values don't end up with a trailing carriage return baked in.
  */
-async function queryRouterMongo(mongoEval) {
+async function queryRouterMongoRaw(mongoEval) {
   const router = allowlist.hosts['lan.router'];
   if (!router) {
     throw new Error('config/allowlist.json has no "lan.router" host entry.');
@@ -90,8 +90,19 @@ async function queryRouterMongo(mongoEval) {
   if (!match) {
     throw new Error(`Unexpected output from router query: ${outputText}`);
   }
+  return match[1];
+}
+
+/**
+ * Same as queryRouterMongoRaw, but for eval scripts that print a single
+ * flat key=value block (most lookups here — one device, a handful of
+ * fields). Row-oriented queries like listClients() parse the raw block
+ * themselves instead, since key=value doesn't fit a variable-length list.
+ */
+async function queryRouterMongo(mongoEval) {
+  const raw = await queryRouterMongoRaw(mongoEval);
   const fields = {};
-  for (const rawLine of match[1].split('\n')) {
+  for (const rawLine of raw.split('\n')) {
     const line = rawLine.trim();
     const idx = line.indexOf('=');
     if (idx === -1) continue;
@@ -103,6 +114,20 @@ async function queryRouterMongo(mongoEval) {
 function ensureIp(ip) {
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
     throw new Error(`Refusing to look up non-IP value: ${ip}`);
+  }
+}
+
+function ensureMac(mac) {
+  if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac)) {
+    throw new Error(`Refusing to act on non-MAC value: ${mac}`);
+  }
+}
+
+function requireControllerConfig() {
+  if (!CONTROLLER_URL || !USERNAME || !PASSWORD) {
+    throw new Error(
+      'UniFi controller is not configured (missing UNIFI_CONTROLLER_URL/USERNAME/PASSWORD in .env).'
+    );
   }
 }
 
@@ -208,11 +233,7 @@ async function sendDevmgrCmd(session, body) {
  * have been exercised for real).
  */
 async function poeBounce(ip) {
-  if (!CONTROLLER_URL || !USERNAME || !PASSWORD) {
-    throw new Error(
-      'UniFi controller is not configured (missing UNIFI_CONTROLLER_URL/USERNAME/PASSWORD in .env).'
-    );
-  }
+  requireControllerConfig();
   const { switchMac, portIdx, deviceName } = await findUplinkPort(ip);
   const session = await login();
   await sendDevmgrCmd(session, { cmd: 'power-cycle', mac: switchMac, port_idx: portIdx });
@@ -227,15 +248,133 @@ async function poeBounce(ip) {
  * uplink too, in principle). NOT YET LIVE-TESTED — same caveat as poeBounce.
  */
 async function restartDevice(ip) {
-  if (!CONTROLLER_URL || !USERNAME || !PASSWORD) {
-    throw new Error(
-      'UniFi controller is not configured (missing UNIFI_CONTROLLER_URL/USERNAME/PASSWORD in .env).'
-    );
-  }
+  requireControllerConfig();
   const { mac, name } = await findDeviceMac(ip);
   const session = await login();
   await sendDevmgrCmd(session, { cmd: 'restart', mac });
   return { mac, name };
 }
 
-module.exports = { poeBounce, restartDevice };
+/**
+ * Lists known WiFi/wired clients from the router's own client table
+ * (db.user — distinct from db.device, which is infra: switches/APs/gateway).
+ * Same SSH+mongo lookup pattern as findUplinkPort/findDeviceMac, for the
+ * same reason noted in README's "PoE bounce and device restart" section:
+ * the API's exact JSON field names were never verified live against this
+ * controller, but the Mongo schema was. Sorted by last_seen descending and
+ * capped at 60 rows — this feeds a single Discord embed (4096-char
+ * description limit), not a paged UI, so an unbounded client table would
+ * just get truncated anyway.
+ *
+ * Row-oriented, not a flat key=value block like the single-device lookups
+ * above, so this parses queryRouterMongoRaw's output itself: one client per
+ * line, fields pipe-separated (hostnames/names can't contain a MongoDB
+ * document boundary but could in principle contain "=", which is why this
+ * doesn't reuse queryRouterMongo's key=value parsing).
+ */
+async function listClients() {
+  const mongoEval = [
+    'var rows = [];',
+    'db.user.find({}, {mac:1, name:1, hostname:1, ip:1, is_wired:1, blocked:1, last_seen:1}).sort({last_seen:-1}).limit(60).forEach(function(u) {',
+    '  rows.push([u.mac || "", u.name || u.hostname || "(unnamed)", u.ip || "", u.is_wired ? "wired" : "wifi", u.blocked ? "blocked" : "active", u.last_seen || ""].join("|"));',
+    '});',
+    'print("RESULT_START");',
+    'print(rows.join("\\n"));',
+    'print("RESULT_END");'
+  ].join(' ');
+
+  const raw = await queryRouterMongoRaw(mongoEval);
+  return raw
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [mac, name, ip, connType, status, lastSeen] = line.split('|');
+      return { mac, name, ip, connType, status, lastSeen: lastSeen ? Number(lastSeen) : null };
+    });
+}
+
+/**
+ * Blocks or unblocks a client by MAC via the controller's stamgr command —
+ * the same call the "Block"/"Unblock" button in the client's detail panel
+ * makes. Unlike /poe and /unifi-restart, this isn't scoped to a fixed
+ * allowlist of pre-approved device keys: the whole point is being able to
+ * act on a client that wasn't anticipated ahead of time (an unrecognized or
+ * misbehaving device someone spots in /unifi-clients output). The
+ * authorization boundary here is Discord's Administrator-only command
+ * permission plus the mandatory confirm button, not an allowlist entry —
+ * see commands/unifi-block.js. NOT YET LIVE-TESTED — same caveat as
+ * poeBounce/restartDevice.
+ */
+async function setClientBlocked(mac, blocked) {
+  requireControllerConfig();
+  ensureMac(mac);
+  const session = await login();
+  const res = await axios.post(
+    `${CONTROLLER_URL}/proxy/network/api/s/${SITE}/cmd/stamgr`,
+    { cmd: blocked ? 'block-sta' : 'unblock-sta', mac },
+    {
+      httpsAgent,
+      timeout: 10000,
+      headers: { Cookie: session.cookie, 'X-Csrf-Token': session.csrfToken },
+      validateStatus: () => true
+    }
+  );
+  if (res.status !== 200 || res.data?.meta?.rc !== 'ok') {
+    throw new Error(`stamgr "${blocked ? 'block-sta' : 'unblock-sta'}" failed: HTTP ${res.status} ${JSON.stringify(res.data?.meta || res.data)}`);
+  }
+  return { mac };
+}
+
+/**
+ * Reads a camera's recording status from the UniFi Protect app, which is a
+ * separate app from Network under the same UniFi OS console — proxied at
+ * /proxy/protect/api rather than /proxy/network/api, but authenticated with
+ * the exact same OS-level login()/session, since UniFi OS grants one login
+ * access to every local app on the console. Matches on the camera's `host`
+ * field, which Protect populates with the camera's LAN IP — the same IP
+ * already stored per-device in config/allowlist.json's poe_devices, so no
+ * new identifier needs to be tracked.
+ *
+ * NOT YET LIVE-TESTED — the Protect API's exact response shape (camera
+ * list field names, recording-mode values) was never verified live against
+ * this controller the way the Network app's Mongo schema was for
+ * findUplinkPort/findDeviceMac; see README's PoE section for why that
+ * verification mattered there. If this throws or returns unexpected data
+ * on first real use, capture the raw `/proxy/protect/api/cameras` response
+ * and adjust the field names below before trusting this further.
+ */
+async function getCameraRecordingStatus(ip) {
+  requireControllerConfig();
+  ensureIp(ip);
+  const session = await login();
+  const res = await axios.get(
+    `${CONTROLLER_URL}/proxy/protect/api/cameras`,
+    {
+      httpsAgent,
+      timeout: 10000,
+      headers: { Cookie: session.cookie, 'X-Csrf-Token': session.csrfToken },
+      validateStatus: () => true
+    }
+  );
+  if (res.status !== 200) {
+    throw new Error(`UniFi Protect camera list failed: HTTP ${res.status}`);
+  }
+  const cameras = Array.isArray(res.data) ? res.data : (res.data?.cameras || []);
+  const cam = cameras.find(c => c.host === ip || c.connectionHost === ip);
+  if (!cam) {
+    throw new Error(
+      `${ip} wasn't found in UniFi Protect's camera list. It may not be adopted into Protect specifically ` +
+      '(the Network app device record /poe and /unifi-restart use is separate from Protect adoption).'
+    );
+  }
+
+  return {
+    name: cam.name || ip,
+    isConnected: cam.state ? cam.state === 'CONNECTED' : Boolean(cam.isConnected),
+    recordingMode: cam.recordingSettings?.mode ?? 'unknown',
+    lastMotion: cam.lastMotion ? new Date(cam.lastMotion).toISOString() : null
+  };
+}
+
+module.exports = { poeBounce, restartDevice, listClients, setClientBlocked, getCameraRecordingStatus };

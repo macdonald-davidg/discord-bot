@@ -8,10 +8,13 @@ A Discord bot that interacts with a self-hosted Open WebUI instance, allowing yo
 - `/status` - Get the status of your Open WebUI instance
 - `/models` - List all available models in your Open WebUI instance
 - `/ask` - Ask a question to your AI models through Open WebUI
-- `/linux`, `/docker`, `/pihole`, `/proxmox`, `/windows`, `/fileserver`, `/router` - Run allowlisted diagnostic checks on your hosts via open-terminal (configured in `config/allowlist.json`; mutating checks require an in-Discord confirmation). `/router` includes two mutating checks (`wan-bounce`, `reboot`) — see "SSH key architecture" below for its dedicated non-fleet key.
+- `/linux`, `/docker`, `/pihole`, `/proxmox`, `/proxmox-backup`, `/windows`, `/fileserver`, `/router` - Run allowlisted diagnostic checks on your hosts via open-terminal (configured in `config/allowlist.json`; mutating checks require an in-Discord confirmation). `/router` includes two mutating checks (`wan-bounce`, `reboot`) — see "SSH key architecture" below for its dedicated non-fleet key. `/windows` includes `reboot`/`shutdown`. `/proxmox-backup` is split out from `/proxmox` rather than folded into it — see "Backups" below for why.
 - `/jarvis-audit` - Sweep every jarvis-managed POSIX host (excludes the router and Windows hosts — see "SSH key architecture" below) and report whether passwordless SSH + passwordless sudo is actually working on each one (no host/check picker — fixed `sudo -n true` probe, read-only, runs in parallel)
 - `/poe` - Power-cycle a camera or access point's PoE switch port, picked from `config/allowlist.json`'s `poe_devices` list (mutating, requires confirmation). The lookup goes over SSH like everything else, but the actual power-cycle call goes straight to the UniFi Network controller's own REST API. See "PoE bounce and device restart" below before using it.
 - `/unifi-restart` - Restart a UniFi switch or AP as a whole device (soft reboot over the controller's management channel, not a port bounce — works even without a wired PoE uplink), picked from `config/allowlist.json`'s `unifi_devices` list (mutating, requires confirmation). Same REST API mechanism as `/poe`. See "PoE bounce and device restart" below.
+- `/unifi-clients` - List known WiFi/wired clients from the controller's client table (read-only, no allowlist picker — see "UniFi client actions" below).
+- `/unifi-block` - Block or unblock a client by MAC address (mutating, requires confirmation). Deliberately not allowlist-scoped like `/poe`/`/unifi-restart` — see "UniFi client actions" below for why.
+- `/camera-status` - Check a camera's UniFi Protect connection + recording status, picked from the same `poe_devices` list `/poe` uses (read-only). See "Camera recording status" below — this one hasn't been live-verified yet.
 
 ## Prerequisites
 
@@ -349,6 +352,88 @@ value, `ip` is the device's stable LAN IP (used to resolve its current
 port/MAC live on every run), `description` is cosmetic. No port number or
 MAC is ever stored — that's what makes this survive a device moving to a
 different physical port, or hardware being swapped, later.
+
+## UniFi client actions
+
+`/unifi-clients` and `/unifi-block` extend the same UniFi controller
+integration `/poe` and `/unifi-restart` use (`src/services/unifiController.js`)
+from infra devices (switches/APs) down to individual clients.
+
+**`/unifi-clients` (read-only)** reads the controller's `db.user` collection
+over the same SSH+mongo path `findUplinkPort`/`findDeviceMac` already use
+(see "PoE bounce and device restart" above for why the lookup goes over SSH
+rather than the REST API — same reasoning applies here: the API's field
+names were never verified live against this controller, but the Mongo
+schema was). Sorted most-recently-seen first, capped at 60 rows since this
+feeds one Discord embed rather than a paged UI.
+
+**`/unifi-block` (mutating)** takes a free-text MAC address rather than a
+dropdown, which is a deliberate break from `/poe`/`/unifi-restart`'s
+allowlist-driven device pickers: those cover a small, fixed set of infra
+devices decided ahead of time, but the entire point of a block command is
+being able to act on a client nobody pre-approved — an unrecognized MAC
+spotted in `/unifi-clients` output, say. The authorization boundary here is
+Discord's Administrator-only command permission plus the mandatory Confirm
+button, not a `config/allowlist.json` entry. Calls the controller's
+`cmd/stamgr` endpoint (`block-sta`/`unblock-sta`) — same REST mechanism as
+`/poe`'s `cmd/devmgr` calls, different command namespace since this targets
+a client, not an infra device.
+
+**NOT YET LIVE-TESTED**, same caveat as `/poe`/`/unifi-restart` when they
+were first added — the read side (`db.user` schema) hasn't been verified
+against this controller's actual data the way `db.device`/`port_table` were
+for the PoE/restart work. Verify a `/unifi-clients` listing looks sane
+before trusting `/unifi-block` against a real MAC.
+
+## Camera recording status
+
+`/camera-status` reads a camera's connection + recording state from the
+**UniFi Protect** app rather than the Network app `/poe`/`/unifi-restart`
+use — a separate app on the same UniFi OS console, proxied at
+`/proxy/protect/api` instead of `/proxy/network/api`, but authenticated with
+the exact same OS-level `login()` session (`getCameraRecordingStatus()` in
+`unifiController.js`), since a UniFi OS login grants access to every local
+app on the console, not just the one you logged in through. Matches a
+camera by IP against Protect's `host` field, reusing the same `poe_devices`
+entries `/poe` already draws its camera list from — no second device list
+to maintain.
+
+**NOT YET LIVE-TESTED.** Unlike the Network app's Mongo schema (verified
+live while building `/poe`), Protect's `/proxy/protect/api/cameras` response
+shape — field names, exact recording-mode values — was never confirmed
+against this controller. If this throws or returns something that doesn't
+look right on first real use, capture the raw response and adjust the field
+names in `getCameraRecordingStatus()` before trusting it further. Only
+recording *status* is exposed right now (connection state, recording mode,
+last-motion timestamp) — no snapshot/live-view/motion-alert-configuration
+abilities, which would be a separate, larger addition.
+
+## Backups
+
+`/proxmox-backup` adds on-demand `vzdump` backups and backup visibility
+(`backup-list`: recent local dump files; `backup-jobs`: configured scheduled
+jobs) for the guests that already have restart/stop checks under `/proxmox`
+(431, 530, 421, 422, 521, 522, 524 — see `config/allowlist.json`).
+
+**Split into its own category/command rather than added to `/proxmox`**
+because `/proxmox` was already at 22 checks and Discord caps a slash
+command's choices at 25 per option — adding 9 backup-related checks there
+would have pushed it to 31, silently truncating the last 6 out of the
+dropdown with no error (`buildCategoryCommand()` used to `.slice(0, 25)`
+with no warning; it now throws at startup instead if any category ever
+grows past the limit — see the guard in `src/services/netcheckRunner.js`).
+
+**Known blocker, not yet resolved: the configured backup storage doesn't
+currently have enough free space to actually run a backup.** The
+`<vmid>-backup` checks are wired up and will show in the `/proxmox-backup`
+dropdown, but firing one for real is expected to fail on disk space until
+that's addressed — check `pvesm status` (`/proxmox`'s `proxmox-storage`
+check) and `backup-list`/`backup-jobs` first to see current headroom before
+trying an on-demand backup. The commands intentionally don't specify
+`--storage` explicitly (`vzdump <vmid> --mode snapshot --compress zstd`),
+relying on whatever backup-content-flagged storage is already configured as
+default — confirm that's still the intended target once storage capacity is
+sorted out, rather than assuming.
 
 ## Discord Bot Setup
 
