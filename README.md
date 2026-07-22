@@ -18,19 +18,29 @@ A Discord bot that interacts with a self-hosted Open WebUI instance, allowing yo
 
 ## Prerequisites
 
-- Node.js 16+ (if running without Docker)
+- Node.js 22+ (matches the Docker image; only needed if running without Docker)
 - Discord Bot Token (from [Discord Developer Portal](https://discord.com/developers/applications))
 - Self-hosted Open WebUI instance
 - Open WebUI API key (generated from Settings > Account in Open WebUI)
+- **open-terminal**, reachable and holding the per-host SSH keys described in
+  "SSH key architecture" below — required by every netcheck command
+  (`/linux`, `/docker`, `/pihole`, `/proxmox*`, `/windows`, `/fileserver`,
+  `/router`, `/jarvis-audit`)
+- A **UniFi Network/Protect controller** with a dedicated local admin account
+  for the bot — required by `/poe`, `/unifi-restart`, `/unifi-clients`,
+  `/unifi-block`, and `/camera-status` (see `UNIFI_CONTROLLER_*` below)
 
 ## Setup
 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/open-webui-discord-bot.git
-cd open-webui-discord-bot
+git clone https://github.com/macdonald-davidg/discord-bot.git
+cd discord-bot
 ```
+
+In this deployment the repo is instead a git submodule cloned into
+`llm-stack/discord-bot/` — see the "Using Docker Compose" step below.
 
 ### 2. Configure environment variables
 
@@ -43,16 +53,33 @@ CLIENT_ID=your_discord_application_id
 GUILD_ID=your_discord_server_id
 
 # Open WebUI Configuration
-# Make sure this URL is publicly accessible from where the bot is hosted
-OPEN_WEBUI_URL=https://your-openwebui-domain.com
+# Only needs to be reachable on the same Docker network as the bot — in this
+# deployment that's the internal llm_network bridge (open-webui:8080), not a
+# public URL. Use a public/Authentik-fronted URL only if the bot itself runs
+# somewhere that can't reach Open WebUI over a private network.
+OPEN_WEBUI_URL=http://open-webui:8080
 
 # API Authentication
 # Get your API key from Settings > Account in Open WebUI
 OPEN_WEBUI_API_KEY=your_open_webui_api_key
 
+# Default model to use for /ask when no model is specified
+OPEN_WEBUI_DEFAULT_MODEL=your_default_model_id
+
 # open-terminal (required by the netcheck commands)
 OPEN_TERMINAL_URL=http://your-open-terminal-host:8100
 OPEN_TERMINAL_API_KEY=your_open_terminal_api_key
+
+# UniFi controller (required by /poe, /unifi-restart, /unifi-clients,
+# /unifi-block, /camera-status) — use a dedicated local admin account
+# created in the Network app UI, not your primary admin login, and use the
+# controller's IP rather than a hostname (see "SSH key architecture" /
+# "PoE bounce and device restart" below for why a CNAME hostname breaks this
+# image's DNS resolution)
+UNIFI_CONTROLLER_URL=https://192.168.x.x
+UNIFI_CONTROLLER_USERNAME=your_dedicated_bot_account
+UNIFI_CONTROLLER_PASSWORD=your_password
+UNIFI_CONTROLLER_SITE=default
 
 # Rate Limiting (requests per minute)
 RATE_LIMIT=10
@@ -60,6 +87,8 @@ RATE_LIMIT=10
 # Optional: Port for status web server
 PORT=3001
 ```
+
+See `.env.example` for the authoritative, fully-commented list.
 
 ### 3. Configure the command allowlist
 
@@ -157,6 +186,7 @@ rest of the fleet.
 | `lan.jarvis` | (the host this bot runs on) | `/home/user/.ssh/bot_llmgpu_ed25519` |
 | `dmz.docker` | docker.example.dmz | `/home/user/.ssh/bot_dmzdocker_ed25519` |
 | `lan.cifs` | fileserver.example.local | `/home/user/.ssh/bot_cifs_ed25519` |
+| `lan.gfh` | nas.example.local | `/home/user/.ssh/bot_gfh_ed25519` |
 | `lan.itunes` | media-vm.example.local (Windows) | `/home/user/.ssh/bot_itunes_ed25519` |
 | `lan.router` | router.example.local | `/home/user/.ssh/bot_router_ed25519` |
 
@@ -439,32 +469,36 @@ sorted out, rather than assuming.
 
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
 2. Create a new application
-3. Go to the "Bot" tab and create a bot
-4. Enable the "MESSAGE CONTENT INTENT" under Privileged Gateway Intents
-5. Copy the token and add it to your `.env` file
-6. Go to OAuth2 > URL Generator
-7. Select the following scopes: `bot`, `applications.commands`
-8. Bot Permissions: `Send Messages`, `Embed Links`, `Read Message History`
-9. Copy the generated URL and open it in your browser to add the bot to your server
+3. Go to the "Bot" tab and create a bot (no Privileged Gateway Intents needed
+   — this bot is slash-command-only and requests only the default `Guilds`
+   and `GuildMessages` intents, no `MESSAGE CONTENT INTENT`)
+4. Copy the token and add it to your `.env` file
+5. Go to OAuth2 > URL Generator
+6. Select the following scopes: `bot`, `applications.commands`
+7. Bot Permissions: `Send Messages`, `Embed Links`, `Read Message History`
+8. Copy the generated URL and open it in your browser to add the bot to your server
 
 ## Docker Deployment
 
-This bot is designed to be easily deployed in a Docker container. The provided Docker configuration includes:
-
-- Health checks to ensure the bot is running
-- Volume mapping for logs
-- Environment variable configuration through `.env` file
-- Automatic restart on failure
-
-To build and run with Docker:
+This bot is designed to be run in a Docker container, but is not deployed
+standalone — see "Using Docker Compose" under Setup above. In this
+deployment it's always built as the `discord-bot` service in the
+**llm-stack** repo's `docker-compose.yml`:
 
 ```bash
-# Build the image
-docker build -t open-webui-discord-bot .
-
-# Run the container
-docker run -d --name open-webui-discord-bot --env-file .env -p 3001:3001 open-webui-discord-bot
+docker compose --project-directory ~/compose/llm-stack up -d --build discord-bot
 ```
+
+That service:
+
+- Publishes **no host port** — it only joins the internal `llm_network`
+  bridge; the Dockerfile's `HEALTHCHECK` hits `http://localhost:$PORT/health`
+  from inside the container, which needs no published port.
+- Bind-mounts only `./discord-bot/config:/app/config:ro` (the allowlist, so
+  it can be edited without a rebuild — restart to apply). There is no logs
+  volume; nothing is written to `logs/` beyond the container's own lifetime.
+- Uses `restart: unless-stopped`, with `env_file: ./discord-bot/.env` for
+  configuration.
 
 ## Troubleshooting
 
