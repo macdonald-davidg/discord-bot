@@ -304,19 +304,36 @@ same Alpine image, so it hits the same failure. Use the controller's IP
 directly; `rejectUnauthorized: false` already means the self-signed cert's
 hostname isn't validated anyway, so there's no downside to using the IP.
 
-**Still not verified: the `cmd/devmgr` calls themselves** — neither
-`power-cycle` nor `restart` has been live-fired (both mutating, deliberately
-not test-fired while building this; only the read-side lookups and the
-login+rename flow have been exercised for real). Specifically unconfirmed:
-whether `power-cycle` accepts a gateway's own MAC as the target the same way
-it does a switch's (a device wired directly into the gateway rather than a
-switch is a `udm`-type target, not `usw`); and whether `restart` behaves the
-same for a switch vs. a wired AP vs. a mesh-uplinked AP. If any of these fail
-where others succeed, that split (gateway vs. switch, wired vs. mesh) is the
-first thing to check. Recommended first test: `/unifi-restart` on a single
-AP (single-device blast radius) before the switch (drops every wired
-downstream device simultaneously for the reboot) or anything on a camera
-(recording gap).
+**`cmd/devmgr restart` confirmed working** against a mesh-uplinked AP (no
+wired PoE port at all) — live-fired for real, command accepted, device
+power-cycled and re-adopted successfully. This also incidentally confirmed
+the whole SSH+mongo lookup → controller-login → `cmd/devmgr` chain works
+end-to-end for a device with no port_table entry anywhere, exactly the case
+`/poe` can't handle but `/unifi-restart` can.
+
+**Still not verified:** `power-cycle` (no mutating PoE-bounce has been
+live-fired yet); `restart` against a switch or a wired-not-mesh AP (only the
+mesh case has been tested); and whether `power-cycle` accepts a gateway's
+own MAC as the target the same way it does a switch's (a device wired
+directly into the gateway rather than a switch is a `udm`-type target, not
+`usw`). Recommended next test: `/unifi-restart` on a wired AP before the
+switch (drops every wired downstream device simultaneously for the reboot),
+then `/poe` on a low-consequence device before a camera (recording gap).
+
+**Fixed: two more bugs found via live testing, not just design review.**
+(1) open-terminal's actual terminal-success status is `"done"`, not
+`"completed"` — every place checking for the literal string `"completed"`
+was silently wrong; see `src/services/unifiController.js`,
+`src/commands/jarvis-audit.js`, and `src/services/netcheckRunner.js` for the
+fix and what each one actually broke (one purely cosmetic, one functional
+and pre-existing). (2) if your UniFi controller password contains a literal
+`$`, escape it as `$$` in `.env` — Docker Compose's own variable
+interpolation applies to `env_file:`-sourced values in the version deployed
+here, and a bare `$word` gets silently treated as an undefined variable
+reference and dropped, truncating the password before the container ever
+sees it. This produced a real `HTTP 403` login failure that looked like a
+wrong password, not a parsing bug — worth checking first if login fails
+despite a manually-verified-correct password.
 
 **Fixed:** one camera's UniFi *name* field didn't match its DNS
 hostname/`poe_devices` key (a leftover naming inconsistency from however it
