@@ -77,7 +77,12 @@ async function queryRouterMongo(mongoEval) {
     identityFile: router.identity_file
   });
 
-  if (status !== 'completed' || exitCode !== 0) {
+  // open-terminal's actual terminal-success status string is "done", not
+  // "completed" — confirmed against every raw API response captured while
+  // building this (2026-07-22). Every prior verification in this session
+  // used raw curl and only checked exit_code, never status, which is why
+  // this mismatch went unnoticed until it broke a real Discord command.
+  if (status !== 'done' || exitCode !== 0) {
     throw new Error(`Router query failed (status=${status}, exit=${exitCode}): ${outputText}`);
   }
 

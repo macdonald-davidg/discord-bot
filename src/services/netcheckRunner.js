@@ -292,7 +292,12 @@ async function runCheck({ interaction, commandName, hostKey, checkKey, host, che
         });
 
         const embed = new EmbedBuilder()
-          .setColor(status === 'completed' && exitCode === 0 ? 0x00cc66 : 0xff9900)
+          // open-terminal's actual terminal-success status is "done", not
+          // "completed" — confirmed 2026-07-22 against real API responses.
+          // Every check run through this path before that fix rendered its
+          // embed orange (warning) even on full success; this was purely
+          // cosmetic (the output itself was always displayed correctly).
+          .setColor(status === 'done' && exitCode === 0 ? 0x00cc66 : 0xff9900)
           .setTitle(`${commandName}: ${checkKey} on ${hostKey}`)
           .setDescription(`\`\`\`\n${outputText}\n\`\`\``)
           .addFields(

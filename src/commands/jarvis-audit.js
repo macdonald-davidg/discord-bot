@@ -46,8 +46,11 @@ module.exports = {
         // ssh itself failed/timed out (auth, DNS, network) before our
         // command's own echo ever ran — exit code won't be 0 in that case
         // since AUDIT_COMMAND's `... || echo ...` only covers sudo failing,
-        // not ssh failing to connect at all.
-        if (status !== 'completed' || exitCode !== 0) {
+        // not ssh failing to connect at all. Terminal-success status from
+        // open-terminal is "done", not "completed" — this comparison was
+        // wrong before 2026-07-22, meaning every host likely reported
+        // "unreachable" on every run regardless of actual SSH/sudo state.
+        if (status !== 'done' || exitCode !== 0) {
           return { hostKey, host, verdict: 'unreachable', detail: firstLine(outputText) || status };
         }
         if (outputText.includes('JARVIS_SUDO_OK')) {
