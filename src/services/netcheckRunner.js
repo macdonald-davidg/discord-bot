@@ -26,9 +26,11 @@ const OPEN_TERMINAL_URL = process.env.OPEN_TERMINAL_URL;
 const OPEN_TERMINAL_API_KEY = process.env.OPEN_TERMINAL_API_KEY;
 
 // Discord caps slash command choices at 25 per option.
-const hostChoices = Object.entries(allowlist.hosts)
-  .slice(0, 25)
-  .map(([key, h]) => ({ name: `${key} — ${h.description}`.slice(0, 100), value: key }));
+function buildHostChoices(hostKeys) {
+  return hostKeys
+    .slice(0, 25)
+    .map(key => ({ name: `${key} — ${allowlist.hosts[key].description}`.slice(0, 100), value: key }));
+}
 
 /**
  * Builds a full Discord slash command (data + execute) scoped to one
@@ -37,10 +39,24 @@ const hostChoices = Object.entries(allowlist.hosts)
  * category key, command name, and description differ between them.
  */
 function buildCategoryCommand({ categoryKey, commandName, commandDescription, readOnly = false }) {
-  const checks = allowlist.categories[categoryKey];
-  if (!checks) {
+  const category = allowlist.categories[categoryKey];
+  if (!category) {
     throw new Error(`Unknown allowlist category: ${categoryKey}`);
   }
+
+  const { hosts: allowedHostKeys, checks } = category;
+  if (!Array.isArray(allowedHostKeys) || allowedHostKeys.length === 0) {
+    throw new Error(
+      `Category "${categoryKey}" has no "hosts" list in config/allowlist.json — ` +
+      'every category must scope itself to the hosts it actually applies to.'
+    );
+  }
+  const unknownHostKeys = allowedHostKeys.filter(key => !allowlist.hosts[key]);
+  if (unknownHostKeys.length > 0) {
+    throw new Error(`Category "${categoryKey}" lists unknown host(s): ${unknownHostKeys.join(', ')}`);
+  }
+
+  const hostChoices = buildHostChoices(allowedHostKeys);
 
   // Safety net for categories deliberately scoped to read-only (currently
   // just "router" — see config/allowlist.json and src/commands/router.js).
@@ -87,7 +103,7 @@ function buildCategoryCommand({ categoryKey, commandName, commandDescription, re
       const host = allowlist.hosts[hostKey];
       const check = checks[checkKey];
 
-      if (!host || !check) {
+      if (!host || !check || !allowedHostKeys.includes(hostKey)) {
         return interaction.reply({ content: 'Invalid host or check selection.', ephemeral: true });
       }
 
@@ -105,53 +121,73 @@ function buildCategoryCommand({ categoryKey, commandName, commandDescription, re
       }
 
       // Mutating check — require explicit confirmation before touching anything.
-      const confirmId = `netcheck-confirm-${interaction.id}`;
-      const cancelId = `netcheck-cancel-${interaction.id}`;
-
-      const warnEmbed = new EmbedBuilder()
-        .setColor(0xff3333)
-        .setTitle(`⚠️ Confirm: ${checkKey} on ${hostKey}`)
-        .setDescription(
-          `This will run:\n\`\`\`${check.sudo ? 'sudo ' : ''}${check.command}\`\`\`\non **${host.hostname}**.\n\nThis action changes state on that host. Confirm within 15 seconds.`
-        )
-        .setFooter({ text: `Requested by ${interaction.user.username}` });
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(confirmId).setLabel('Confirm').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId(cancelId).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-      );
-
-      const promptMessage = await interaction.reply({ embeds: [warnEmbed], components: [row], fetchReply: true });
-
-      let buttonInteraction;
-      try {
-        buttonInteraction = await promptMessage.awaitMessageComponent({
-          filter: i => i.user.id === interaction.user.id && (i.customId === confirmId || i.customId === cancelId),
-          time: 15000
-        });
-      } catch {
-        // Timed out with no click.
-        return interaction.editReply({
-          embeds: [warnEmbed.setColor(0x888888).setTitle(`Timed out: ${checkKey} on ${hostKey}`)],
-          components: []
-        });
-      }
-
-      if (buttonInteraction.customId === cancelId) {
-        return buttonInteraction.update({
-          embeds: [warnEmbed.setColor(0x888888).setTitle(`Cancelled: ${checkKey} on ${hostKey}`)],
-          components: []
-        });
-      }
-
-      await buttonInteraction.update({
-        embeds: [warnEmbed.setColor(0xffaa00).setTitle(`Running: ${checkKey} on ${hostKey}`)],
-        components: []
+      const confirmed = await confirmMutatingAction(interaction, {
+        idPrefix: 'netcheck',
+        title: `${checkKey} on ${hostKey}`,
+        description: `This will run:\n\`\`\`${check.sudo ? 'sudo ' : ''}${check.command}\`\`\`\non **${host.hostname}**.\n\nThis action changes state on that host. Confirm within 15 seconds.`
       });
+      if (!confirmed) return;
 
       return runCheck({ interaction, commandName, hostKey, checkKey, host, check });
     }
   };
+}
+
+/**
+ * Shared Confirm/Cancel button gate for any mutating action, regardless of
+ * whether it runs over SSH (buildCategoryCommand's mutating checks) or some
+ * other transport (e.g. /poe's UniFi controller API calls). Replies to the
+ * interaction itself with the warning embed/buttons; on confirm, edits that
+ * same reply to "Running" and returns true so the caller can do the actual
+ * work and finish with its own interaction.editReply. On cancel/timeout, it
+ * finishes the interaction itself and returns false — the caller does nothing
+ * further.
+ */
+async function confirmMutatingAction(interaction, { idPrefix, title, description }) {
+  const confirmId = `${idPrefix}-confirm-${interaction.id}`;
+  const cancelId = `${idPrefix}-cancel-${interaction.id}`;
+
+  const warnEmbed = new EmbedBuilder()
+    .setColor(0xff3333)
+    .setTitle(`⚠️ Confirm: ${title}`)
+    .setDescription(description)
+    .setFooter({ text: `Requested by ${interaction.user.username}` });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(confirmId).setLabel('Confirm').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(cancelId).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+  );
+
+  const promptMessage = await interaction.reply({ embeds: [warnEmbed], components: [row], fetchReply: true });
+
+  let buttonInteraction;
+  try {
+    buttonInteraction = await promptMessage.awaitMessageComponent({
+      filter: i => i.user.id === interaction.user.id && (i.customId === confirmId || i.customId === cancelId),
+      time: 15000
+    });
+  } catch {
+    // Timed out with no click.
+    await interaction.editReply({
+      embeds: [warnEmbed.setColor(0x888888).setTitle(`Timed out: ${title}`)],
+      components: []
+    });
+    return false;
+  }
+
+  if (buttonInteraction.customId === cancelId) {
+    await buttonInteraction.update({
+      embeds: [warnEmbed.setColor(0x888888).setTitle(`Cancelled: ${title}`)],
+      components: []
+    });
+    return false;
+  }
+
+  await buttonInteraction.update({
+    embeds: [warnEmbed.setColor(0xffaa00).setTitle(`Running: ${title}`)],
+    components: []
+  });
+  return true;
 }
 
 /**
@@ -281,4 +317,4 @@ async function runCheck({ interaction, commandName, hostKey, checkKey, host, che
       }
 }
 
-module.exports = { buildCategoryCommand, executeRemoteCommand, allowlist };
+module.exports = { buildCategoryCommand, executeRemoteCommand, confirmMutatingAction, allowlist };

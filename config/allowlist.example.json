@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy this file to config/allowlist.json and edit for your environment. hosts: machines the bot may SSH into (key becomes the Discord choice); optional identity_file (absolute path as seen inside the open-terminal container, e.g. /home/user/.ssh/some_key) authenticates that host with a dedicated key instead of open-terminal's default fleet-wide id_ed25519 -- use this for anything outside your normal trusted fleet, see README.md's 'SSH key architecture' section. categories: one object per slash command (linux, docker, pihole, proxmox, windows, fileserver); each entry is a check the command may run. sudo: prefix the command with sudo. mutating: require a Confirm/Cancel button press in Discord before running. A category built with buildCategoryCommand({ ..., readOnly: true }) in its src/commands/<name>.js file refuses to start if any of its checks are mutating: true -- see src/commands/router.js.",
+  "_comment": "Copy this file to config/allowlist.json and edit for your environment. hosts: machines the bot may SSH into (key becomes the Discord choice); optional identity_file (absolute path as seen inside the open-terminal container, e.g. /home/user/.ssh/some_key) authenticates that host with a dedicated key instead of open-terminal's default fleet-wide id_ed25519 -- use this for anything outside your normal trusted fleet, see README.md's 'SSH key architecture' section. categories: one object per slash command (linux, docker, pihole, proxmox, windows, fileserver). Each category has 'hosts' (array of host keys this command's dropdown offers -- e.g. a 'windows' category should only list your actual Windows host keys, not every host in the fleet; buildCategoryCommand() throws at startup if a category has no hosts list or lists an unknown host key) and 'checks' (the commands that category may run). sudo: prefix the command with sudo. mutating: require a Confirm/Cancel button press in Discord before running. A category built with buildCategoryCommand({ ..., readOnly: true }) in its src/commands/<name>.js file refuses to start if any of its checks are mutating: true -- see src/commands/router.js.",
   "hosts": {
     "webserver": {
       "description": "Primary web server",
@@ -10,67 +10,91 @@
       "description": "Pi-hole DNS server",
       "hostname": "dns01.example.local",
       "ssh_user": "diag"
+    },
+    "win01": {
+      "description": "Windows file share host",
+      "hostname": "win01.example.local",
+      "ssh_user": "diag",
+      "platform": "windows"
     }
   },
   "categories": {
     "linux": {
-      "uptime": {
-        "description": "Show uptime and load averages",
-        "command": "uptime",
-        "sudo": false,
-        "mutating": false
-      },
-      "disk-usage": {
-        "description": "Show filesystem usage",
-        "command": "df -h",
-        "sudo": false,
-        "mutating": false
-      },
-      "reboot": {
-        "description": "Reboot the host",
-        "command": "systemctl reboot",
-        "sudo": true,
-        "mutating": true
+      "hosts": ["webserver", "dns01"],
+      "checks": {
+        "uptime": {
+          "description": "Show uptime and load averages",
+          "command": "uptime",
+          "sudo": false,
+          "mutating": false
+        },
+        "disk-usage": {
+          "description": "Show filesystem usage",
+          "command": "df -h",
+          "sudo": false,
+          "mutating": false
+        },
+        "reboot": {
+          "description": "Reboot the host",
+          "command": "systemctl reboot",
+          "sudo": true,
+          "mutating": true
+        }
       }
     },
     "docker": {
-      "ps": {
-        "description": "List running containers",
-        "command": "docker ps",
-        "sudo": false,
-        "mutating": false
+      "hosts": ["webserver"],
+      "checks": {
+        "ps": {
+          "description": "List running containers",
+          "command": "docker ps",
+          "sudo": false,
+          "mutating": false
+        }
       }
     },
     "pihole": {
-      "status": {
-        "description": "Show Pi-hole status",
-        "command": "pihole status",
-        "sudo": false,
-        "mutating": false
+      "hosts": ["dns01"],
+      "checks": {
+        "status": {
+          "description": "Show Pi-hole status",
+          "command": "pihole status",
+          "sudo": false,
+          "mutating": false
+        }
       }
     },
     "proxmox": {
-      "vm-list": {
-        "description": "List VMs on this node",
-        "command": "qm list",
-        "sudo": true,
-        "mutating": false
+      "hosts": ["webserver"],
+      "checks": {
+        "vm-list": {
+          "description": "List VMs on this node",
+          "command": "qm list",
+          "sudo": true,
+          "mutating": false
+        }
       }
     },
     "windows": {
-      "uptime": {
-        "description": "Show boot time",
-        "command": "powershell -Command \"(Get-CimInstance Win32_OperatingSystem).LastBootUpTime\"",
-        "sudo": false,
-        "mutating": false
+      "hosts": ["win01"],
+      "checks": {
+        "uptime": {
+          "description": "Show boot time",
+          "command": "powershell -Command \"(Get-CimInstance Win32_OperatingSystem).LastBootUpTime\"",
+          "sudo": false,
+          "mutating": false
+        }
       }
     },
     "fileserver": {
-      "nfs-exports": {
-        "description": "Show active NFS exports",
-        "command": "showmount -e localhost",
-        "sudo": false,
-        "mutating": false
+      "hosts": ["dns01"],
+      "checks": {
+        "nfs-exports": {
+          "description": "Show active NFS exports",
+          "command": "showmount -e localhost",
+          "sudo": false,
+          "mutating": false
+        }
       }
     }
   }

@@ -8,8 +8,10 @@ A Discord bot that interacts with a self-hosted Open WebUI instance, allowing yo
 - `/status` - Get the status of your Open WebUI instance
 - `/models` - List all available models in your Open WebUI instance
 - `/ask` - Ask a question to your AI models through Open WebUI
-- `/linux`, `/docker`, `/pihole`, `/proxmox`, `/windows`, `/fileserver`, `/router` - Run allowlisted diagnostic checks on your hosts via open-terminal (configured in `config/allowlist.json`; mutating checks require an in-Discord confirmation). `/router` is read-only by design — see "SSH key architecture" below.
+- `/linux`, `/docker`, `/pihole`, `/proxmox`, `/windows`, `/fileserver`, `/router` - Run allowlisted diagnostic checks on your hosts via open-terminal (configured in `config/allowlist.json`; mutating checks require an in-Discord confirmation). `/router` includes two mutating checks (`wan-bounce`, `reboot`) — see "SSH key architecture" below for its dedicated non-fleet key.
 - `/jarvis-audit` - Sweep every jarvis-managed POSIX host (excludes the router and Windows hosts — see "SSH key architecture" below) and report whether passwordless SSH + passwordless sudo is actually working on each one (no host/check picker — fixed `sudo -n true` probe, read-only, runs in parallel)
+- `/poe` - Power-cycle a camera or access point's PoE switch port, picked from `config/allowlist.json`'s `poe_devices` list (mutating, requires confirmation). The lookup goes over SSH like everything else, but the actual power-cycle call goes straight to the UniFi Network controller's own REST API. See "PoE bounce and device restart" below before using it.
+- `/unifi-restart` - Restart a UniFi switch or AP as a whole device (soft reboot over the controller's management channel, not a port bounce — works even without a wired PoE uplink), picked from `config/allowlist.json`'s `unifi_devices` list (mutating, requires confirmation). Same REST API mechanism as `/poe`. See "PoE bounce and device restart" below.
 
 ## Prerequisites
 
@@ -96,18 +98,32 @@ docker compose up -d --build discord-bot
 ## Adding new checks or commands
 
 **Adding a check to an existing category** (e.g. another `/proxmox` check): add
-an entry under the relevant category in `config/allowlist.json` — no code
+an entry under `categories.<name>.checks` in `config/allowlist.json` — no code
 change needed. Restart the `discord-bot` container to pick it up; commands
 re-register with Discord automatically on startup (`src/index.js` calls
 `registerCommands()` every boot, so there's no separate manual deploy step).
 
 **Adding a new category** (a whole new host/check-picker slash command like
 `/linux` or `/proxmox`): add a `categories.<name>` block to
-`config/allowlist.json`, then create `src/commands/<name>.js` as a thin
-wrapper around `buildCategoryCommand()` — see `src/commands/linux.js` for the
-minimal 7-line pattern every category command follows. Any `.js` file dropped
-into `src/commands/` is auto-loaded (`src/index.js`), so nothing else needs
-wiring up.
+`config/allowlist.json` with two keys — `hosts` (the array of host keys this
+command's dropdown should offer) and `checks` (the commands it may run) — then
+create `src/commands/<name>.js` as a thin wrapper around
+`buildCategoryCommand()` — see `src/commands/linux.js` for the minimal 7-line
+pattern every category command follows. Any `.js` file dropped into
+`src/commands/` is auto-loaded (`src/index.js`), so nothing else needs wiring
+up.
+
+**Scoping a category to specific hosts:** each category's `hosts` array is
+the actual Discord dropdown for that command — a host key not listed there
+can't be selected, and `buildCategoryCommand()` throws at startup if a
+category has no `hosts` list or lists an unknown host key. Keep this list
+matched to reality: `/windows` should only ever list actual Windows hosts
+(currently just `lan.itunes`), `/fileserver` only the boxes that run
+Samba/NFS (`lan.gfh`, `lan.cifs`), `/proxmox` only the hypervisor itself
+(`lan.server`), and so on — see `config/allowlist.json` for the full mapping.
+`/linux`'s generic checks (uptime/disk/memory/etc.) are the exception and
+stay broad across every non-Windows, non-router host, since those checks are
+meaningful almost anywhere.
 
 **Adding a command that isn't a single host/check picker** (e.g.
 `/jarvis-audit`, which sweeps every allowlisted host with one fixed command
@@ -199,15 +215,20 @@ key file was deleted from `open-terminal`'s volume and its
 key itself was **not** revoked from any fleet host's `authorized_keys` — it's
 still what the interactive `jarvis` identity uses.
 
-**Why `/router` is read-only:** many consumer/prosumer router/gateway
+**`/router` and root access:** many consumer/prosumer router/gateway
 appliances have no non-root SSH account, so `lan.router` necessarily
 authenticates as `root` — there's no unprivileged account to fall back to
 the way `jarvis` is unprivileged-until-`sudo` on every other host.
-`buildCategoryCommand()` takes a `readOnly: true` option (see
-`src/commands/router.js`) that throws at startup if the category ever picks
-up a `mutating: true` check, so a future allowlist edit can't silently turn
-a read-only category into one that can change state on the network's
-gateway/firewall from Discord.
+`buildCategoryCommand()` takes a `readOnly: true` option that throws at
+startup if the category ever picks up a `mutating: true` check — this
+category originally used it as a hard safety net. It was deliberately
+dropped when `wan-bounce` and `reboot` were added as intentional mutating
+checks; both still go through the standard Confirm/Cancel button gate before
+running (see `buildCategoryCommand()` in `src/services/netcheckRunner.js`),
+same as any other mutating check in the allowlist. If `/router` should ever
+go back to read-only-only, re-add `readOnly: true` in
+`src/commands/router.js` and remove those two checks first (the option
+throws at startup otherwise).
 
 **Persisting a key on a UniFi Dream Machine-family router across reboots and
 firmware updates:** newer UniFi OS builds (`uos` CLI, no `unifi-os shell`
@@ -221,6 +242,96 @@ Scripts go in `/data/on_boot.d/` (not `/mnt/data/`). Confirmed working
 against a `uos 5.1.4` device in this deployment; check `uos --version` (vs.
 whether `unifi-os` exists at all) on any other UniFi OS console before
 assuming either mechanism applies.
+
+## PoE bounce and device restart
+
+`/poe` power-cycles the PoE port a camera or access point is plugged into.
+`/unifi-restart` restarts a switch or AP as a whole device (a soft reboot
+over the controller's management channel, not a port-level power toggle —
+works even for a device with no PoE uplink at all, e.g. one on a wireless
+mesh backhaul). Both are hybrids: the read-only lookup step goes over SSH
+through open-terminal, same as everything else — but the actual mutating
+action goes through the UniFi Network controller's own REST API
+(`src/services/unifiController.js`), because neither PoE port control nor a
+device restart is a plain shell command; both are things the controller
+itself has to tell the device over its own management protocol.
+
+**Why the lookup is SSH+mongo, not the REST API too:** the API's exact JSON
+field names were never verified live — only the router's local MongoDB
+schema was (read-only, over SSH). Rather than guess at the API's shape, the
+lookup reads the DB directly (known-correct) and only the mutating call uses
+the REST API, which has a simple, well-documented, stable signature.
+
+**The port lookup was rebuilt to use each switch/gateway's own `port_table`,
+not the target device's self-reported uplink field.** The original version
+trusted a device's own `last_uplink.type`, which can go stale — one AP's own
+record still said `"wireless"` even though the switch's `port_table`
+(LLDP-confirmed, `poe_good: true`) showed it live-connected on a real port.
+The self-reported field simply hadn't been refreshed. `findUplinkPort()` now
+searches every adopted switch/gateway (`type: {$in: ["usw","udm"]}`) for a
+`port_table` entry whose `last_connection.ip` matches — a single, more
+authoritative mechanism that covers wired clients regardless of which
+upstream device (switch vs. gateway) they're actually plugged into. This
+also reliably distinguishes a genuinely wireless-meshed device (no entry in
+any port_table — nothing to cycle) from one that's actually wired but
+under-reporting its own state.
+
+Some devices may be powered by a standalone wall-outlet PoE injector rather
+than a managed switch/gateway port — for those, `findUplinkPort()` correctly
+finds no port_table match (there's no managed port to control at all, so
+`/poe` can't do anything for them regardless of implementation), but
+`/unifi-restart` still works since it goes over the device's management
+channel rather than a physical port.
+
+**Login/CSRF confirmed working**, via a dedicated local admin account
+created in the Network app UI specifically for the bot (not the primary
+admin login — see `.env.example`'s comment on why). `login()`'s cookie +
+CSRF handling and a `GET`/`PUT` round-trip against `rest/user/<id>` were
+both exercised for real (used to fix a client-naming issue — see below) and
+worked exactly as documented: `POST /api/auth/login` → `TOKEN` cookie +
+`X-Csrf-Token` header, `GET`/`PUT /proxy/network/api/s/<site>/rest/user/<id>`
+returns/accepts `{meta:{rc}, data:[{...}]}`.
+
+**`UNIFI_CONTROLLER_URL` must be an IP, not a hostname that's a CNAME.**
+Confirmed live: if your controller's hostname is a CNAME to its "real" name
+(common on UniFi OS consoles — the friendly hostname is often a CNAME
+record), the bot's `node:22-alpine` base image's musl libc `getaddrinfo()` —
+what `dns.lookup`/`axios`/`https` use by default — doesn't chase that CNAME
+and fails with `ENOTFOUND`, even though `dig`/`nslookup` resolve it fine
+(different resolution path) and Node's own JS resolver (`dns.resolve4`) also
+works fine. This isn't a test-script-only issue — the deployed bot uses the
+same Alpine image, so it hits the same failure. Use the controller's IP
+directly; `rejectUnauthorized: false` already means the self-signed cert's
+hostname isn't validated anyway, so there's no downside to using the IP.
+
+**Still not verified: the `cmd/devmgr` calls themselves** — neither
+`power-cycle` nor `restart` has been live-fired (both mutating, deliberately
+not test-fired while building this; only the read-side lookups and the
+login+rename flow have been exercised for real). Specifically unconfirmed:
+whether `power-cycle` accepts a gateway's own MAC as the target the same way
+it does a switch's (a device wired directly into the gateway rather than a
+switch is a `udm`-type target, not `usw`); and whether `restart` behaves the
+same for a switch vs. a wired AP vs. a mesh-uplinked AP. If any of these fail
+where others succeed, that split (gateway vs. switch, wired vs. mesh) is the
+first thing to check. Recommended first test: `/unifi-restart` on a single
+AP (single-device blast radius) before the switch (drops every wired
+downstream device simultaneously for the reboot) or anything on a camera
+(recording gap).
+
+**Fixed:** one camera's UniFi *name* field didn't match its DNS
+hostname/`poe_devices` key (a leftover naming inconsistency from however it
+was originally set up). Renamed via a one-off script using the same
+`login()`/`rest/user` mechanism `/poe` relies on, fetching the full record,
+changing only `name`, `PUT`-ing it back, and reading it back fresh
+afterward to confirm the change actually stuck (it did) — a useful pattern
+for any other one-off client-record fix via this same controller API.
+
+List bounceable devices under `poe_devices` and restartable devices under
+`unifi_devices` in `config/allowlist.json` — key is the Discord dropdown
+value, `ip` is the device's stable LAN IP (used to resolve its current
+port/MAC live on every run), `description` is cosmetic. No port number or
+MAC is ever stored — that's what makes this survive a device moving to a
+different physical port, or hardware being swapped, later.
 
 ## Discord Bot Setup
 
