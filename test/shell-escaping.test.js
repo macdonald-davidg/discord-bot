@@ -30,7 +30,7 @@ describe('executeRemoteCommand shell quoting', () => {
   async function captureFor(remoteCommand) {
     await executeRemoteCommand({
       sshUser: 'testuser',
-      hostname: 'test.mrenet.local',
+      hostname: 'example-host.test',
       remoteCommand
     });
     return capturedCommand;
@@ -38,7 +38,7 @@ describe('executeRemoteCommand shell quoting', () => {
 
   test('a command with no quotes passes through unescaped inside the outer quotes', async () => {
     const cmd = await captureFor('systemctl status nginx');
-    assert.equal(cmd, "ssh -T -o BatchMode=yes -o ConnectTimeout=8 -l testuser test.mrenet.local 'systemctl status nginx'");
+    assert.equal(cmd, "ssh -T -o BatchMode=yes -o ConnectTimeout=8 -l testuser example-host.test 'systemctl status nginx'");
   });
 
   test('a single embedded quote is escaped with the close-escape-reopen sequence', async () => {
@@ -46,7 +46,7 @@ describe('executeRemoteCommand shell quoting', () => {
     // The literal quote inside remoteCommand must become '\'' — closing the
     // outer quote, an escaped literal quote, then reopening — never a bare
     // quote that would terminate the outer quoting early.
-    assert.equal(cmd, `ssh -T -o BatchMode=yes -o ConnectTimeout=8 -l testuser test.mrenet.local 'echo '\\''Running'\\'''`);
+    assert.equal(cmd, `ssh -T -o BatchMode=yes -o ConnectTimeout=8 -l testuser example-host.test 'echo '\\''Running'\\'''`);
   });
 
   test('multiple embedded quotes are each escaped independently', async () => {
@@ -59,13 +59,13 @@ describe('executeRemoteCommand shell quoting', () => {
     capturedCommand = null;
     await executeRemoteCommand({
       sshUser: 'testuser',
-      hostname: 'test.mrenet.local',
+      hostname: 'example-host.test',
       remoteCommand: 'echo hi',
-      identityFile: '/home/jarvis/.ssh/jarvis_test_ed25519'
+      identityFile: '/home/testuser/.ssh/fixture_ed25519'
     });
     assert.equal(
       capturedCommand,
-      "ssh -T -o BatchMode=yes -o ConnectTimeout=8 -i /home/jarvis/.ssh/jarvis_test_ed25519 -o IdentitiesOnly=yes -l testuser test.mrenet.local 'echo hi'"
+      "ssh -T -o BatchMode=yes -o ConnectTimeout=8 -i /home/testuser/.ssh/fixture_ed25519 -o IdentitiesOnly=yes -l testuser example-host.test 'echo hi'"
     );
   });
 
@@ -75,7 +75,7 @@ describe('executeRemoteCommand shell quoting', () => {
     });
     const result = await executeRemoteCommand({
       sshUser: 'testuser',
-      hostname: 'test.mrenet.local',
+      hostname: 'example-host.test',
       remoteCommand: 'echo hi'
     });
     assert.equal(result.status, 'done');

@@ -13,7 +13,7 @@ describe('ensureIp', () => {
   });
 
   test('rejects a hostname', () => {
-    assert.throws(() => ensureIp('redacted-dockerhost.example.internal'), /Refusing to look up non-IP value/);
+    assert.throws(() => ensureIp('some-host.example.test'), /Refusing to look up non-IP value/);
   });
 
   test('rejects a value with a trailing mongo-injection attempt', () => {
