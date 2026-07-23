@@ -58,11 +58,13 @@ function buildCategoryCommand({ categoryKey, commandName, commandDescription, re
 
   const hostChoices = buildHostChoices(allowedHostKeys);
 
-  // Safety net for categories deliberately scoped to read-only (currently
-  // just "router" — see config/allowlist.json and src/commands/router.js).
-  // Fails loudly at startup rather than letting a future allowlist edit
-  // silently add a mutating command to a category that was reviewed and
-  // approved specifically because it couldn't change state.
+  // Safety net for any category built with readOnly: true. Fails loudly at
+  // startup rather than letting a future allowlist edit silently add a
+  // mutating command to a category that was reviewed and approved
+  // specifically because it couldn't change state. No category currently
+  // opts into readOnly — router lost that status once wan-bounce/reboot
+  // were added as mutating checks (see src/commands/router.js) — but
+  // linux and fileserver have zero mutating checks today and could.
   if (readOnly) {
     const mutatingKeys = Object.entries(checks).filter(([, c]) => c.mutating).map(([k]) => k);
     if (mutatingKeys.length > 0) {
