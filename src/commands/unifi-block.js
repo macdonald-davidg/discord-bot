@@ -13,6 +13,10 @@ const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
 // see the comment on setClientBlocked() in services/unifiController.js.
 module.exports = {
   cooldown: 15,
+  // Exported for testing, alongside the command's own data/execute — the
+  // index.js loader only reads those two keys, so this extra property is
+  // inert at runtime.
+  MAC_RE,
   data: new SlashCommandBuilder()
     .setName('unifi-block')
     .setDescription('Block or unblock a client on the UniFi network by MAC address')

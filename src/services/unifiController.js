@@ -377,4 +377,10 @@ async function getCameraRecordingStatus(ip) {
   };
 }
 
-module.exports = { poeBounce, restartDevice, listClients, setClientBlocked, getCameraRecordingStatus };
+module.exports = {
+  poeBounce, restartDevice, listClients, setClientBlocked, getCameraRecordingStatus,
+  // Exported for testing — these are the last line of defense before a
+  // Discord-supplied string reaches a Mongo --eval script or a controller
+  // API call, so their behavior is worth locking in with a test.
+  ensureIp, ensureMac
+};
